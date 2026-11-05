@@ -120,7 +120,9 @@ bool App::init(const AppOptions& options) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+    // SF_GL_DEBUG=1: a debug context, and the driver's own messages (performance warnings too) in the log.
+    static const bool glDebug = std::getenv("SF_GL_DEBUG") != nullptr;
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG | (glDebug ? SDL_GL_CONTEXT_DEBUG_FLAG : 0));
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     // No multisampling in the window: the 3D view antialiases in its own target (Renderer::drawView), so it can
@@ -176,6 +178,19 @@ bool App::init(const AppOptions& options) {
     }
     SDL_Log("OpenGL %s on %s", reinterpret_cast<const char*>(gl::GetString(GL_VERSION)),
             reinterpret_cast<const char*>(gl::GetString(GL_RENDERER)));
+    if (glDebug) {
+        using Callback = void(SF_GLAPI*)(GLenum, GLenum, GLuint, GLenum, GLsizei, const char*, const void*);
+        using SetCallback = void(SF_GLAPI*)(Callback, const void*);
+        if (auto set = reinterpret_cast<SetCallback>(SDL_GL_GetProcAddress("glDebugMessageCallback"))) {
+            gl::Enable(0x92E0); // GL_DEBUG_OUTPUT
+            gl::Enable(0x8242); // GL_DEBUG_OUTPUT_SYNCHRONOUS (the message names the call that caused it)
+            set([](GLenum, GLenum type, GLuint id, GLenum severity, GLsizei, const char* message, const void*) {
+                    static int count = 0; // (the first 400, then only warnings: drivers report every shader built)
+                    if (++count > 400 && severity == 0x826B) return; // GL_DEBUG_SEVERITY_NOTIFICATION
+                    SDL_Log("GL debug (type 0x%04x, id %u, severity 0x%04x): %s", unsigned(type), unsigned(id), unsigned(severity), message);
+                }, nullptr);
+        } else SDL_Log("SF_GL_DEBUG: no glDebugMessageCallback");
+    }
 
     std::string err;
     if (!renderer_.init(err)) {

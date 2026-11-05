@@ -2631,9 +2631,21 @@ int Renderer::drawView(const Camera& camera, int width, int height, const Render
         return 1;
     }
     gl::BindFramebuffer(GL_FRAMEBUFFER, viewFbo_);
+    // SF_STALL_PROBE=ms: a view slower than that waits for the GPU after each step and says which one took it.
+    static const double probeMs = std::getenv("SF_STALL_PROBE") ? std::atof(std::getenv("SF_STALL_PROBE")) : -1.0;
+    const auto probeStart = std::chrono::steady_clock::now();
+    const auto since = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - probeStart).count(); };
+    if (probeMs >= 0.0) gl::Finish();
+    const double before = since();
     draw(camera, width, height, settings, viewport);
+    const double submitted = since();
+    if (probeMs >= 0.0) gl::Finish();
+    const double drawn = since();
     for (int i = 0; i < 16 && gl::GetError() != GL_NO_ERROR; ++i) {
     }
+    if (probeMs >= 0.0 && since() > probeMs)
+        SDL_Log("view %.1f ms: GPU work queued before it %.1f, draw submit %.1f, draw on the GPU %.1f, error check %.1f", since(),
+                before, submitted - before, drawn - submitted, since() - drawn);
     gl::BindFramebuffer(GL_READ_FRAMEBUFFER, viewFbo_); // resolve: same format and size on both sides
     gl::BindFramebuffer(GL_DRAW_FRAMEBUFFER, viewResolveFbo_);
     gl::BlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -3443,11 +3455,27 @@ void Renderer::commitStrokeUpload(StrokeUpload& up) {
     MeshSlot& s = *found;
     if (up.regrid) s.grid = up.grid; // (with every vertex, packed on it)
     if (!up.ranges.empty()) {
+        static const double probeMs = std::getenv("SF_STALL_PROBE") ? std::atof(std::getenv("SF_STALL_PROBE")) : -1.0;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (probeMs >= 0.0) gl::Finish();
+        const auto t1 = std::chrono::steady_clock::now();
         gl::BindBuffer(GL_ARRAY_BUFFER, s.vertexBuffer);
-        for (const StrokeUpload::Range& r : up.ranges)
+        size_t bytes = 0;
+        for (const StrokeUpload::Range& r : up.ranges) {
             gl::BufferSubData(GL_ARRAY_BUFFER, GLintptr(size_t(r.begin) * sizeof(PackedVertex)),
                               GLsizeiptr(size_t(r.end - r.begin) * sizeof(PackedVertex)), up.data.data() + r.offset);
+            bytes += size_t(r.end - r.begin) * sizeof(PackedVertex);
+        }
         gl::BindBuffer(GL_ARRAY_BUFFER, 0);
+        if (probeMs >= 0.0) {
+            const auto t2 = std::chrono::steady_clock::now();
+            gl::Finish();
+            const auto t3 = std::chrono::steady_clock::now();
+            const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            if (ms(t0, t3) > probeMs)
+                SDL_Log("stroke upload %.1f ms: GPU work queued before it %.1f, %zu ranges / %.1f MB submitted in %.1f, on the GPU %.1f",
+                        ms(t0, t3), ms(t0, t1), up.ranges.size(), double(bytes) / 1e6, ms(t1, t2), ms(t2, t3));
+        }
     }
     if (!up.movedClusters.empty()) {
         s.bounds.resize(s.order.clusters().size());
