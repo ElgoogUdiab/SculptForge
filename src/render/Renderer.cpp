@@ -3471,12 +3471,13 @@ void Renderer::commitStrokeUpload(StrokeUpload& up) {
     if (up.regrid) s.grid = up.grid; // (with every vertex, packed on it)
     if (!up.ranges.empty()) {
         static const double probeMs = std::getenv("SF_STALL_PROBE") ? std::atof(std::getenv("SF_STALL_PROBE")) : -1.0;
-        // The first stroke write into this vertex array waits for the GPU to be done with it: NVIDIA otherwise
-        // copies the whole array aside for it (950 ms for a 15M head on an RTX 3060, the first dab; with the wait,
-        // a few). SF_UPLOAD_MODE=3 skips the wait (for checking).
+        // The first stroke write into this vertex array is waited for: on NVIDIA the next draw otherwise stalls
+        // (930-1050 ms for a 15M head on an RTX 3060, the first dab). SF_UPLOAD_MODE (for checking): 3 no wait,
+        // 4 a wait before the write only, 5 before and after.
         static const int mode = std::getenv("SF_UPLOAD_MODE") ? std::atoi(std::getenv("SF_UPLOAD_MODE")) : 0;
-        if (!s.strokeWritten && mode != 3) gl::Finish();
+        const bool first = !s.strokeWritten;
         s.strokeWritten = true;
+        if (first && (mode == 4 || mode == 5)) gl::Finish();
         const auto t0 = std::chrono::steady_clock::now();
         if (probeMs >= 0.0) gl::Finish();
         const auto t1 = std::chrono::steady_clock::now();
@@ -3488,6 +3489,7 @@ void Renderer::commitStrokeUpload(StrokeUpload& up) {
             bytes += size_t(r.end - r.begin) * sizeof(PackedVertex);
         }
         gl::BindBuffer(GL_ARRAY_BUFFER, 0);
+        if (first && (mode == 0 || mode == 5)) gl::Finish();
         if (probeMs >= 0.0) {
             const auto t2 = std::chrono::steady_clock::now();
             gl::Finish();
