@@ -22,7 +22,6 @@
 #include <cmath>
 #include <thread>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -1258,26 +1257,12 @@ void uploadGathered(std::vector<uint8_t>& staging, GLuint buffer, size_t element
         send();
         pieces.clear();
     };
-    // A whole array: written straight into the mapped buffer, in parallel (no staging copy). Then one element
-    // written again the way a stroke writes them: NVIDIA moves an array it was handed mapped to where small writes
-    // go at the first such write (933 ms for a 15M head's vertices on an RTX 3060: the first dab), so that happens
-    // here, while the mesh loads. (SF_UPLOAD_MODE=1: never mapped; 2: mapped without the write, as before.)
-    static const int mode = std::getenv("SF_UPLOAD_MODE") ? std::atoi(std::getenv("SF_UPLOAD_MODE")) : 0;
-    if (mode != 1 && allocate && runs.size() == 1 && runs[0].first == 0 && runs[0].second == count && count > 0) {
+    // A whole array: written straight into the mapped buffer, in parallel (no staging copy).
+    if (allocate && runs.size() == 1 && runs[0].first == 0 && runs[0].second == count && count > 0) {
         if (auto* dst = static_cast<uint8_t*>(gl::MapBufferRange(GL_ARRAY_BUFFER, 0, GLsizeiptr(count * elementSize),
                                                                  GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT))) {
-            // (The first piece through staging, kept for that write: fill() runs once per element, on whole blocks.)
-            const size_t head = std::min<size_t>(count, kPiece);
-            staging.resize(std::max(staging.size(), head * elementSize));
-            fill(0, uint32_t(head), staging.data());
-            std::memcpy(dst, staging.data(), head * elementSize);
-            poolFor(count - head, [&](size_t b, size_t e) {
-                fill(uint32_t(head + b), uint32_t(head + e), dst + (head + b) * elementSize);
-            }, kPiece);
-            if (gl::UnmapBuffer(GL_ARRAY_BUFFER)) {
-                if (mode != 2) gl::BufferSubData(GL_ARRAY_BUFFER, 0, GLsizeiptr(elementSize), staging.data());
-                return;
-            }
+            poolFor(count, [&](size_t b, size_t e) { fill(uint32_t(b), uint32_t(e), dst + b * elementSize); }, kPiece);
+            if (gl::UnmapBuffer(GL_ARRAY_BUFFER)) return;
             // (The data was lost, which drivers may do on a mode switch: sent the usual way below.)
         }
     }
@@ -1426,6 +1411,7 @@ void Renderer::uploadVertices(MeshSlot& s, const Mesh& mesh, bool full) {
         if (!inside) outside.store(true, std::memory_order_relaxed);
     };
     uploadGathered(staging_, s.vertexBuffer, sizeof(PackedVertex), ns, full, dirtyRuns_, fill, &blockChanged_);
+    if (full) s.strokeWritten = false; // (a new array: its first stroke write waits again, commitStrokeUpload)
     if (outside.load()) {
         // A vertex left the grid: a new grid, and everything sent again.
         s.grid = PositionGrid::around(meshBounds(mesh));
@@ -3485,6 +3471,12 @@ void Renderer::commitStrokeUpload(StrokeUpload& up) {
     if (up.regrid) s.grid = up.grid; // (with every vertex, packed on it)
     if (!up.ranges.empty()) {
         static const double probeMs = std::getenv("SF_STALL_PROBE") ? std::atof(std::getenv("SF_STALL_PROBE")) : -1.0;
+        // The first stroke write into this vertex array waits for the GPU to be done with it: NVIDIA otherwise
+        // copies the whole array aside for it (950 ms for a 15M head on an RTX 3060, the first dab; with the wait,
+        // a few). SF_UPLOAD_MODE=3 skips the wait (for checking).
+        static const int mode = std::getenv("SF_UPLOAD_MODE") ? std::atoi(std::getenv("SF_UPLOAD_MODE")) : 0;
+        if (!s.strokeWritten && mode != 3) gl::Finish();
+        s.strokeWritten = true;
         const auto t0 = std::chrono::steady_clock::now();
         if (probeMs >= 0.0) gl::Finish();
         const auto t1 = std::chrono::steady_clock::now();

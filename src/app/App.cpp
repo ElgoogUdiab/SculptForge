@@ -275,6 +275,13 @@ bool App::init(const AppOptions& options) {
 }
 
 void App::shutdown() {
+    if (!glContext_ || !ImGui::GetCurrentContext()) { // init failed before the GL context and the UI (no window, no driver)
+        if (ImGui::GetCurrentContext()) ImGui::DestroyContext();
+        if (glContext_) SDL_GL_DestroyContext(glContext_);
+        if (window_) SDL_DestroyWindow(window_);
+        SDL_Quit();
+        return;
+    }
     saveWindowState();
     if (doc_.sculptor.strokeActive()) endStroke();
     solver_.reset(); // (its thread uses the renderer)
